@@ -2,21 +2,26 @@
 // Created by user on 7/24/25.
 //
 #include <bpf/bpf_helpers.h>
+#include "vmlinux.h"
 #include <linux/bpf.h>
 #include <bpf/bpf_endian.h>
-#include <linux/in.h>
+// #include <linux/in.h>
+// #include <linux/if_ether.h>
+// #include <linux/ip.h>
+// #include <linux/tcp.h>
 
 #include "entropy.bpf.h"
 
 #include <stdbool.h>
 
+
 #define ETH_P_IP		0x0800
 // #define IPPROTO_TCP		6
-#define PAD_BYTES 0  // No need to define any hexadecimal or other data because I'm padding zeroes
+#define PAD_BYTES 100  // No need to define any hexadecimal or other data because I'm padding zeroes
 
 
 // Function for checking pointer arithmetic for verifier
-static bool verifier_checker(void *data, void *data_end, u32 pkt_size) {
+static bool verifier_checker(void *data, void *data_end, __u32 pkt_size) {
 
     if ((data + pkt_size) > data_end) {
         return false;
@@ -55,6 +60,13 @@ static bool verifier_checker(void *data, void *data_end, u32 pkt_size) {
         return false;
     }
 
+    // Ensure TCP Header is not exceeding bounds
+    int tcp_hdr_len = tcp->doff * 4;
+
+    if ((void *)tcp + tcp_hdr_len > data_end) {
+        return false;
+    }
+
     return true;
 }
 
@@ -84,9 +96,9 @@ int xdp_padding(struct xdp_md *ctx) {
     struct iphdr *ip;
     struct tcphdr *tcp;
 
-    u32 init_pkt_size, mdf_pkt_size;
+    __u32 init_pkt_size, mdf_pkt_size;
     __u32 l3_len_or_mtu;
-    u32 pad_bytes;
+    __u32 pad_bytes;
 
     // Pointers to packet data
     data = (void *)(unsigned long)ctx->data;
@@ -170,3 +182,6 @@ int xdp_padding(struct xdp_md *ctx) {
 
 
 // Force only TCP and IPv4 connections on main interface  ## METHOD 2 - Hard
+
+
+char __license[] SEC("license") = "GPL";
