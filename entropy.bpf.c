@@ -1,9 +1,9 @@
 //
 // Created by user on 7/24/25.
 //
+#include "include/vmlinux.h"
 #include <bpf/bpf_helpers.h>
-#include "vmlinux.h"
-#include <linux/bpf.h>
+// #include <linux/bpf.h>
 #include <bpf/bpf_endian.h>
 // #include <linux/in.h>
 // #include <linux/if_ether.h>
@@ -21,7 +21,7 @@
 
 
 // Function for checking pointer arithmetic for verifier
-static bool verifier_checker(void *data, void *data_end, __u32 pkt_size) {
+static bool verifier_checker(void *data, void *data_end, u32 pkt_size) {
 
     if ((data + pkt_size) > data_end) {
         return false;
@@ -96,9 +96,9 @@ int xdp_padding(struct xdp_md *ctx) {
     struct iphdr *ip;
     struct tcphdr *tcp;
 
-    __u32 init_pkt_size, mdf_pkt_size;
-    __u32 l3_len_or_mtu;
-    __u32 pad_bytes;
+    u32 init_pkt_size, mdf_pkt_size;
+    u32 l3_len_or_mtu;
+    u32 pad_bytes;
 
     // Pointers to packet data
     data = (void *)(unsigned long)ctx->data;
