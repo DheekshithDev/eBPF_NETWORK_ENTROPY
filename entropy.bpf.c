@@ -10,14 +10,18 @@
 // #include <linux/ip.h>
 // #include <linux/tcp.h>
 
-#include "entropy.bpf.h"
-
 #include <stdbool.h>
 
 
 #define ETH_P_IP		0x0800
 // #define IPPROTO_TCP		6
 #define PAD_BYTES 100  // No need to define any hexadecimal or other data because I'm padding zeroes
+
+// Ring buffer map
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);  // 16 MB Buffer
+}rb SEC(".maps");
 
 
 // Function for checking pointer arithmetic for verifier
@@ -100,6 +104,9 @@ int xdp_padding(struct xdp_md *ctx) {
     u32 l3_len_or_mtu;
     u32 pad_bytes;
 
+    // Number of bytes I want to capture from the TCP header
+    const int tcp_header_bytes = sizeof(struct tcphdr);  // = 32; // I only need 8 bytes since I am only grabbing TCP_SEQ_NUM
+
     // Pointers to packet data
     data = (void *)(unsigned long)ctx->data;
     data_end = (void *)(unsigned long)ctx->data_end;
@@ -138,6 +145,21 @@ int xdp_padding(struct xdp_md *ctx) {
     // }
     //
     // __u32 mtu = fib.mtu;
+
+    // CAN USE THIS INSTEAD OF bpf_ringbuf_reserve and bpf_ringbuf_submit
+    // int ret = bpf_ringbuf_output(ringbuf_space, tcp, tcp_header_bytes, 0);
+
+    // Reserve space in ring buffer
+    void *ringbuf_space = bpf_ringbuf_reserve(&rb, tcp_header_bytes, 0);
+    if (!ringbuf_space) {
+        return XDP_PASS;  // If ringbuf reservation fails, skip processing this packet
+    }
+
+    // Copy TCP header bytes into the ringbuf without using a verifier-friendly loop // Using full TCP header size but I don't need all, I just need TCP_SEQ_NUM
+    __builtin_memcpy(ringbuf_space, tcp, tcp_header_bytes);
+
+    // Submit data to ring buffer
+    bpf_ringbuf_submit(ringbuf_space, 0);
 
     l3_len_or_mtu = 0;
     int r = bpf_check_mtu(ctx, 0, &l3_len_or_mtu, +PAD_BYTES, 0);
