@@ -50,6 +50,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 
 int main(int argc, char **argv) {
     struct entropy_bpf *skel;
+    struct ring_buffer *rb = NULL;
     int ifindex, err;
     int i;
     // const int pkt_count = 1000;  // Do this only for 1000 packets
