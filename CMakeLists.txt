@@ -16,7 +16,8 @@ add_custom_target(bpf_target ALL DEPENDS entropy.bpf.o entropy.bpf.skel.h)
 add_executable(Entropy_Project main.c
 #        entropy.bpf.c
 #        entropy.bpf.h
-        entropy.userspace.c)
+        entropy.userspace.c
+        entropy_uapi.h)
 
 add_dependencies(Entropy_Project bpf_target)
 include_directories(${CMAKE_SOURCE_DIR}/include)

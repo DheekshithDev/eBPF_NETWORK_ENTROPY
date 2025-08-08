@@ -3,6 +3,7 @@
 //
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <net/if.h>
 #include <netinet/ip.h>
@@ -11,39 +12,45 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
+#define PCAP_DONT_INCLUDE_PCAP_BPF_H
+#include <pcap/pcap.h>
+#include <pcap/dlt.h>
+
 #include "entropy.bpf.skel.h"  // Generated skeleton header with Clang
 
 #define PKT_COUNT 1000  // Only for 1000 packets
 
-static FILE *logf = NULL;
+static pcap_dumper_t *dumper;
+static pcap_t *pcap_handle;
+
+// Userspace side data structures
+struct pcap_record {
+    uint32_t ts_sec;
+    uint32_t ts_usec;
+    uint32_t incl_len;
+    uint32_t orig_len;
+    uint8_t data[];
+};
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
-    if (data_sz < 20) {  // Minimum TCP Header size
-        fprintf(stderr, "Received incomplete TCP Header\n");
+
+    if (data_sz < sizeof(struct pcap_record)) {  // No data
+        fprintf(stderr, "No data to read error\n");
         return 0;
     }
 
-    if (data_sz < sizeof(struct tcphdr)) {
-        fprintf(stderr, "Data size (%zu) less than TCP header size.\n", data_sz);
-        return 0;
-    }
+    const struct pcap_record *rec = data;
 
-    struct tcphdr *tcp = (struct tcphdr *)data;
+    struct pcap_pkthdr phdr = {
+        .ts = {
+            .tv_sec = rec->ts_sec,
+            .tv_usec = rec->ts_usec,
+        },
+        .caplen = rec->incl_len,
+        .len = rec->orig_len,
+    };
 
-    uint16_t source_port = ntohs(tcp->source);
-    uint16_t dest_port = ntohs(tcp->dest);
-    uint32_t seq = ntohl(tcp->seq);
-    uint32_t ack_seq = ntohl(tcp->ack_seq);
-    uint16_t window = ntohs(tcp->window);
-
-    // No need to extract flags
-
-    // Write to a file
-    if (logf) {
-        fprintf(logf, "%u, %u, %u, %u, %u\n", source_port, dest_port, seq, ack_seq, window);
-
-        // fflush(logf);  // No need to flush as I don't need the data immediately each run
-    }
+    pcap_dump((u_char *)dumper, &phdr, rec->data);
 
     return 0;
 }
@@ -51,8 +58,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 int main(int argc, char **argv) {
     struct entropy_bpf *skel;
     struct ring_buffer *rb = NULL;
-    int ifindex, err;
-    int i;
+    int ifindex, err = 0;
     // const int pkt_count = 1000;  // Do this only for 1000 packets
 
     if (argc != 2) {
@@ -68,15 +74,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Open file for logging details
-    logf = fopen("entropy_events.csv", "w");
-    if (!logf) {
-        perror("fopen entropy_events.csv");
+    pcap_handle = pcap_open_dead(DLT_EN10MB, 65535);
+    dumper = pcap_dump_open(pcap_handle, "capture.pcap");
+    if (!dumper) {
+        fprintf(stderr, "Unable to open PCAP dump: %s\n", pcap_geterr(pcap_handle));
         return 1;
     }
-
-    // Header row for csv file
-    fprintf(logf, "src_port, dst_port, seq, ack_seq, window\n");
 
     // Open BPF application
     skel = entropy_bpf__open();
@@ -119,9 +122,9 @@ int main(int argc, char **argv) {
     printf("Start polling the ring buffer\n");
 
     // Ring buffer poll
-    i = 0;
+    int i = 0;
     while(i <= PKT_COUNT) {
-        err = ring_buffer__poll(rb, -1);
+        err = ring_buffer__poll(rb, -1);  // No timeout
 
         if (err == -EINTR) continue;
 
@@ -133,8 +136,10 @@ int main(int argc, char **argv) {
     }
 
 cleanup:
-    if (logf) fclose(logf);
-    entropy_bpf__destroy(skel);
-    printf("Successfully destroyed skel\n");
+    if (rb)             ring_buffer__free(rb);
+    if (skel)           entropy_bpf__destroy(skel);
+    if (dumper)         {pcap_dump_flush(dumper); pcap_dump_close(dumper);}
+    if (pcap_handle)    pcap_close(pcap_handle);
+    printf("Successfully destroyed rb, skel, dumper, pcap_handle\n");
     return -err;
 }

@@ -23,59 +23,21 @@ struct {
     __uint(max_entries, 1 << 24);  // 16 MB Buffer
 }rb SEC(".maps");
 
+struct pcap_record {
+    __u32 ts_sec;
+    __u32 ts_usec;
+    __u32 incl_len;
+    __u32 orig_len;
+    __u8 data[];
+};
 
 // Function for checking pointer arithmetic for verifier
-static bool verifier_checker(void *data, void *data_end, u32 pkt_size) {
-
-    if ((data + pkt_size) > data_end) {
-        return false;
-    }
-
-    struct ethhdr *eth = data;
-
-    // Ensure Ethernet Header is within bounds for Verifier
-    if ((void *)(eth + 1) > data_end) {
-        return false;
-    }
-
-    struct iphdr *ip = (struct iphdr *)(eth + 1);
-
-    // Ensure IP Header is within bounds for Verifier
-    if ((void *)(ip + 1) > data_end) {
-        return false;
-    }
-
-    // Calculate IP Header length
-    int ip_hdr_len = ip->ihl * 4;
-    if (ip_hdr_len < sizeof(struct iphdr)) {
-        return false;
-    }
-
-    // Ensure IP Header is within bounds
-    if ((void *)ip + ip_hdr_len > data_end) {
-        return false;
-    }
-
-    // Grab TCP Header
-    struct tcphdr *tcp = (struct tcphdr *)((void *)ip + ip_hdr_len); // not casting ip to (unsigned char *) as (void *) does the same on GNU-GCC and Clang but not ISO strict C.
-
-    // Ensure TCP Header is within bounds
-    if ((void *)(tcp + 1) > data_end) {
-        return false;
-    }
-
-    // Ensure TCP Header is not exceeding bounds
-    int tcp_hdr_len = tcp->doff * 4;
-
-    if ((void *)tcp + tcp_hdr_len > data_end) {
-        return false;
-    }
-
-    return true;
+static bool verifier_checker(void *data, void *data_end, __u32 need) {
+    return data + need <= data_end;
 }
 
 // Helper function to check if the packet is TCP and IPv4  ## METHOD 1 - Easy
-static bool is_tcp_ipv4(struct ethhdr *eth) {
+static __always_inline bool is_tcp_ipv4(struct ethhdr *eth) {
 
     // Only handle IPv4 packets
     if (bpf_ntohs(eth->h_proto) != ETH_P_IP) {
@@ -94,31 +56,32 @@ static bool is_tcp_ipv4(struct ethhdr *eth) {
 
 SEC("xdp")
 int xdp_padding(struct xdp_md *ctx) {
-
-    void *data, *data_end;
-    struct ethhdr *eth;
-    struct iphdr *ip;
-    struct tcphdr *tcp;
-
-    u32 init_pkt_size, mdf_pkt_size;
-    u32 l3_len_or_mtu;
-    u32 pad_bytes;
+    __u32 l3_len_or_mtu;
 
     // Number of bytes I want to capture from the TCP header
-    const int tcp_header_bytes = sizeof(struct tcphdr);  // = 32; // I only need 8 bytes since I am only grabbing TCP_SEQ_NUM
+    // const int tcp_header_bytes = sizeof(struct tcphdr);  // = 32; // I only need 8 bytes since I am only grabbing TCP_SEQ_NUM
 
     // Pointers to packet data
-    data = (void *)(unsigned long)ctx->data;
-    data_end = (void *)(unsigned long)ctx->data_end;
+    void *data = (void *) (unsigned long) ctx->data;
+    void *data_end = (void *) (unsigned long) ctx->data_end;
     // Get current packet length
-    init_pkt_size = data_end - data;
+    __u32 init_pkt_size = data_end - data;
 
     if (!verifier_checker(data, data_end, init_pkt_size)) {
         return XDP_ABORTED;
     }
 
     // Grab ETH Header
-     eth = data;
+    struct ethhdr *eth = data;
+    if (!verifier_checker(eth, data_end, 1)) {
+        return XDP_ABORTED;
+    }
+
+    // Grab IP Header
+    struct iphdr *ip = (struct iphdr *) (eth + 1);
+    if (!verifier_checker(ip, data_end, 1)) {
+        return XDP_ABORTED;
+    }
 
     // Check if the packet is a TCP packet
     if (!is_tcp_ipv4(eth)) {
@@ -126,15 +89,23 @@ int xdp_padding(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
-    // Grab IP Header
-     ip = (struct iphdr *)(eth + 1);
-
     // Calculate IP Header length
     int ip_hdr_len = ip->ihl * 4;
+    if (!verifier_checker(ip, data_end, ip_hdr_len)) {
+        return XDP_ABORTED;
+    }
 
     // Grab TCP Header
-    tcp = (struct tcphdr *)((void *)ip + ip_hdr_len); // not casting ip to (unsigned char *) as (void *) does the same on GNU-GCC and Clang but not ISO strict C.
+    struct tcphdr *tcp = (struct tcphdr *) ((void *) ip + ip_hdr_len); // not casting ip to (unsigned char *) as (void *) does the same on GNU-GCC and Clang but not ISO strict C.
+    if (!verifier_checker(tcp, data_end, 1)) {
+        return XDP_ABORTED;
+    }
 
+    // Calculate TCP Header length
+    int tcp_hdr_len = tcp->doff * 4;
+    if (!verifier_checker(tcp, data_end, tcp_hdr_len)) {
+        return XDP_ABORTED;
+    }
     // CODE FOR ACCURATE PADDING OR SHRINKING BY GRABBING ROUTE MTU
     // struct bpf_fib_lookup fib = {};
     //
@@ -146,21 +117,6 @@ int xdp_padding(struct xdp_md *ctx) {
     //
     // __u32 mtu = fib.mtu;
 
-    // CAN USE THIS INSTEAD OF bpf_ringbuf_reserve and bpf_ringbuf_submit
-    // int ret = bpf_ringbuf_output(ringbuf_space, tcp, tcp_header_bytes, 0);
-
-    // Reserve space in ring buffer
-    void *ringbuf_space = bpf_ringbuf_reserve(&rb, tcp_header_bytes, 0);
-    if (!ringbuf_space) {
-        return XDP_PASS;  // If ringbuf reservation fails, skip processing this packet
-    }
-
-    // Copy TCP header bytes into the ringbuf without using a verifier-friendly loop // Using full TCP header size but I don't need all, I just need TCP_SEQ_NUM
-    __builtin_memcpy(ringbuf_space, tcp, tcp_header_bytes);
-
-    // Submit data to ring buffer
-    bpf_ringbuf_submit(ringbuf_space, 0);
-
     l3_len_or_mtu = 0;
     int r = bpf_check_mtu(ctx, 0, &l3_len_or_mtu, +PAD_BYTES, 0);
 
@@ -170,7 +126,7 @@ int xdp_padding(struct xdp_md *ctx) {
     }
 
     if (init_pkt_size < l3_len_or_mtu) {  // I can pad since there is space
-         pad_bytes = (l3_len_or_mtu - init_pkt_size);
+         __u32 pad_bytes = (l3_len_or_mtu - init_pkt_size);
 
         // Might need to check bpf_check_mtu() again here.
 
@@ -184,11 +140,65 @@ int xdp_padding(struct xdp_md *ctx) {
         data = (void *)(unsigned long)ctx->data;
         data_end = (void *)(unsigned long)ctx->data_end;
         // Get modified packet length
-        mdf_pkt_size = data_end - data;
+        __u32 mdf_pkt_size = data_end - data;
 
         if (!verifier_checker(data, data_end, mdf_pkt_size)) {
             return XDP_ABORTED;
         }
+
+        eth = data;
+        if (!verifier_checker(eth, data_end, 1)) {
+            return XDP_ABORTED;
+        }
+
+        ip = (struct iphdr *)(eth + 1);
+        if (!verifier_checker(ip, data_end, 1)) {
+            return XDP_ABORTED;
+        }
+
+        ip_hdr_len = ip->ihl * 4;
+        if (!verifier_checker(ip, data_end, ip_hdr_len)) {
+            return XDP_ABORTED;
+        }
+
+        tcp = (struct tcphdr *)((void *)ip + ip_hdr_len); // not casting ip to (unsigned char *) as (void *) does the same on GNU-GCC and Clang but not ISO strict C.
+        if (!verifier_checker(tcp, data_end, 1)) {
+            return XDP_ABORTED;
+        }
+
+        tcp_hdr_len = tcp->doff * 4;
+        if (!verifier_checker(tcp, data_end, tcp_hdr_len)) {
+            return XDP_ABORTED;
+        }
+
+        __u32 all_hdr_lens = sizeof(*eth) + ip_hdr_len + tcp_hdr_len;
+        if (!verifier_checker(data, data_end, all_hdr_lens)) {
+            return XDP_ABORTED;
+        }
+
+        // CAN USE THIS INSTEAD OF bpf_ringbuf_reserve and bpf_ringbuf_submit
+        // int ret = bpf_ringbuf_output(ringbuf_space, tcp, tcp_header_bytes, 0);
+
+        // Get current time
+        __u64 now_ns = bpf_ktime_get_ns();
+
+        // Reserve space in ring buffer
+        struct pcap_record *ringbuf_rec = bpf_ringbuf_reserve(&rb, sizeof(struct pcap_record) + all_hdr_lens, 0);
+        if (!ringbuf_rec) {
+            return XDP_PASS;  // If ringbuf reservation fails, skip processing this packet
+        }
+
+        ringbuf_rec->ts_sec = now_ns / 1000000000ULL;
+        ringbuf_rec->ts_usec = (now_ns % 1000000000ULL) / 1000;
+        ringbuf_rec->incl_len = all_hdr_lens;
+        ringbuf_rec->orig_len = mdf_pkt_size;
+
+        // Copy TCP header bytes into the ringbuf without using a verifier-friendly loop // Using full TCP header size but I don't need all, I just need TCP_SEQ_NUM
+        // __builtin_memcpy(ringbuf_rec->data, data, all_hdr_lens);
+        bpf_probe_read_kernel(ringbuf_rec->data, all_hdr_lens, data);
+
+        // Submit data to ring buffer
+        bpf_ringbuf_submit(ringbuf_rec, 0);
 
         bpf_printk("Packet padded successfully with zeroes!");
 
@@ -202,8 +212,6 @@ int xdp_padding(struct xdp_md *ctx) {
 
 }
 
-
 // Force only TCP and IPv4 connections on main interface  ## METHOD 2 - Hard
-
 
 char __license[] SEC("license") = "GPL";
