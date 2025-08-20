@@ -5,19 +5,21 @@ set(CMAKE_C_STANDARD 11)
 
 add_custom_command(
         OUTPUT entropy.bpf.o entropy.bpf.skel.h
-        COMMAND clang -O2 -g -target bpf -c entropy.bpf.c -o entropy.bpf.o
+        COMMAND clang -O2 -g -target bpf -c XDP_entropy.bpf.c -o entropy.bpf.o
         COMMAND bpftool gen skeleton entropy.bpf.o > entropy.bpf.skel.h
-        DEPENDS entropy.bpf.c
+        DEPENDS XDP_entropy.bpf.c
 )
 
 add_custom_target(bpf_target ALL DEPENDS entropy.bpf.o entropy.bpf.skel.h)
 
 
-add_executable(Entropy_Project main.c
+add_executable(Entropy_Project
 #        entropy.bpf.c
 #        entropy.bpf.h
-        entropy.userspace.c
-        entropy_uapi.h)
+        XDP_entropy.userspace.c
+        TC_entropy.bpf.c
+        TC_entropy.userspace.c
+)
 
 add_dependencies(Entropy_Project bpf_target)
 include_directories(${CMAKE_SOURCE_DIR}/include)

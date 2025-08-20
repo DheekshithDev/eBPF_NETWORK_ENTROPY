@@ -33,8 +33,8 @@ struct pcap_record {
 };
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
-
-    if (data_sz < sizeof(struct pcap_record)) {  // No data
+    if (data_sz < sizeof(struct pcap_record)) {
+        // No data
         fprintf(stderr, "No data to read error\n");
         return 0;
     }
@@ -50,7 +50,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         .len = rec->orig_len,
     };
 
-    pcap_dump((u_char *)dumper, &phdr, rec->data);
+    pcap_dump((u_char *) dumper, &phdr, rec->data);
 
     return 0;
 }
@@ -123,12 +123,12 @@ int main(int argc, char **argv) {
 
     // Ring buffer poll
     int i = 0;
-    while(i <= PKT_COUNT) {
-        err = ring_buffer__poll(rb, -1);  // No timeout
+    while (i <= PKT_COUNT) {
+        err = ring_buffer__poll(rb, -1); // No timeout
 
         if (err == -EINTR) continue;
 
-        if (err <  0) {
+        if (err < 0) {
             fprintf(stderr, "Failed to poll ring buffer: %d\n", err);
             break;
         }
@@ -136,10 +136,13 @@ int main(int argc, char **argv) {
     }
 
 cleanup:
-    if (rb)             ring_buffer__free(rb);
-    if (skel)           entropy_bpf__destroy(skel);
-    if (dumper)         {pcap_dump_flush(dumper); pcap_dump_close(dumper);}
-    if (pcap_handle)    pcap_close(pcap_handle);
+    if (rb) ring_buffer__free(rb);
+    if (skel) entropy_bpf__destroy(skel);
+    if (dumper) {
+        pcap_dump_flush(dumper);
+        pcap_dump_close(dumper);
+    }
+    if (pcap_handle) pcap_close(pcap_handle);
     printf("Successfully destroyed rb, skel, dumper, pcap_handle\n");
     return -err;
 }
