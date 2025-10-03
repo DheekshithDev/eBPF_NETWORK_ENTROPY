@@ -19,6 +19,8 @@ add_executable(Entropy_Project
         XDP_entropy.userspace.c
         TC_entropy.bpf.c
         TC_entropy.userspace.c
+        Padding/Full/full_entropy.bpf.c
+        Padding/Full/full_entropy.userspace.c
 )
 
 add_dependencies(Entropy_Project bpf_target)

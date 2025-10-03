@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <errno.h>
 #include <net/if.h>
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+
+#include "TC_entropy.bpf.skel.h"  // Generated skeleton header with Clang
 
 
 #define PKT_COUNT 1000  // Only for 1000 packets
@@ -20,7 +24,7 @@ static void sig_int(int signo)
 }
 
 int main(int argc, char **argv) {
-    struct tc_entropy_bpf *skel;
+    struct TC_entropy_bpf *skel;
     bool hook_created = false;
     int ifindex, err = 0;
 
@@ -40,11 +44,17 @@ int main(int argc, char **argv) {
     DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = ifindex, .attach_point = BPF_TC_EGRESS);
     DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
 
-    // Open and Load BPF application
-    skel = tc_entropy_bpf__open_and_load();
+    // Open BPF application
+    skel = TC_entropy_bpf__open();
     if (!skel) {
         fprintf(stderr, "Failed to open skel\n");
         return 1;
+    }
+
+    // Load and Verify BPF programs
+    err = TC_entropy_bpf__load(skel);
+    if (err) {
+        fprintf(stderr, "Failed to load and verify skel %d\n", err);
     }
 
     err = bpf_tc_hook_create(&tc_hook);
@@ -74,7 +84,8 @@ int main(int argc, char **argv) {
     /* Loop */
     int i = 0;
     while(!exiting && i <= PKT_COUNT) {
-        fprintf(stderr, "/////////////");
+        fprintf(stderr, "*********");
+        sleep(2);
         i++;
     }
 
@@ -88,6 +99,7 @@ int main(int argc, char **argv) {
 cleanup:
     if (hook_created)
         bpf_tc_hook_destroy(&tc_hook);
-    tc_entropy_bpf__destroy(skel);
+    TC_entropy_bpf__destroy(skel);
+    printf("Successfully destroyed TC-Egress program!\n");
     return -err;
 }
