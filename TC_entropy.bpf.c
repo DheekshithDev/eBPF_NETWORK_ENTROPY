@@ -242,44 +242,44 @@ int tc_egress(struct __sk_buff *ctx) {
 
         bpf_printk("Modified packet length is: %u\n", mdf_pkt_len);
 
-        /*** FIXES FOR INCREASING PACKET LENGTH ***/
-        /** IP START **/
-        /* Update IPv4 tot_len field */
-        __u16 new_ip_len = old_ip_len + pad_bytes;
-        if (new_ip_len > 65535) {  // Something went wrong
-            return TC_ACT_SHOT;
-        }
-        ip->tot_len = bpf_htons(new_ip_len);
-
-        /* L3-IP checksum replace */
-        bpf_l3_csum_replace(ctx, offsetof(struct iphdr, check), bpf_htons(old_ip_len), bpf_htons(new_ip_len), sizeof(__u16));
-        /** IP END **/
-
-        /** TCP START **/
-        /* SEQ Num Fix - START */
-        // __be32 old_seq_num = tcp->seq;
-        // __be32 new_seq_num = ntohl(old_seq_num) + pad_bytes;  // If I dont fix seq_num, it might overload the recv_window_size of the receiver
-        // tcp->seq = htonl(new_seq_num);  // No need for htonl coz of __be32
+        // /*** FIXES FOR INCREASING PACKET LENGTH ***/
+        // /** IP START **/
+        // /* Update IPv4 tot_len field */
+        // __u16 new_ip_len = old_ip_len + pad_bytes;
+        // if (new_ip_len > 65535) {  // Something went wrong
+        //     return TC_ACT_SHOT;
+        // }
+        // ip->tot_len = bpf_htons(new_ip_len);
         //
-        // /* L4-TCP checksum replace */
-        // __s64 seq_diff = bpf_csum_diff(&old_seq_num, sizeof(old_seq_num), &new_seq_num, sizeof(new_seq_num), tcp->check);
-
-        /* Padding actual bytes than 0s (Optional) - START */
-        // I need this step if I am padding bytes other than 0s.
-        //__s64 payload_diff = bpf_csum_diff(NULL, 0, &pad_bytes, __aligned_be64(sizeof(pad_bytes), 4), tcp->check);  // Since I am appending only 0s, pad_bytes won't have any data; I dont need this step.
-        // __u32 tcp_check_offset = &tcp->check - data;
-        /* Padding actual bytes than 0s (Optional) - END */
-
-        // I can combine these two calls into a single bpf_csum_diff and do bpf_l4_csum_replace once.
-        // bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), 0, seq_diff, 0);
-        /* SEQ Num Fix - END */
-
-        __u16 old_tcp_len = old_ip_len - ip_hl;
-        __u16 new_tcp_len = new_ip_len - ip_hl;
-        bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), bpf_htons(old_tcp_len), bpf_htons(new_tcp_len), BPF_F_PSEUDO_HDR | 2);  // Change specifically for the Pseudo-header of TCP
-
-        /** TCP END **/
-        /*** FIXES FOR INCREASING PACKET LENGTH ***/
+        // /* L3-IP checksum replace */
+        // bpf_l3_csum_replace(ctx, offsetof(struct iphdr, check), bpf_htons(old_ip_len), bpf_htons(new_ip_len), sizeof(__u16));
+        // /** IP END **/
+        //
+        // /** TCP START **/
+        // /* SEQ Num Fix - START */
+        // // __be32 old_seq_num = tcp->seq;
+        // // __be32 new_seq_num = ntohl(old_seq_num) + pad_bytes;  // If I dont fix seq_num, it might overload the recv_window_size of the receiver
+        // // tcp->seq = htonl(new_seq_num);  // No need for htonl coz of __be32
+        // //
+        // // /* L4-TCP checksum replace */
+        // // __s64 seq_diff = bpf_csum_diff(&old_seq_num, sizeof(old_seq_num), &new_seq_num, sizeof(new_seq_num), tcp->check);
+        //
+        // /* Padding actual bytes than 0s (Optional) - START */
+        // // I need this step if I am padding bytes other than 0s.
+        // //__s64 payload_diff = bpf_csum_diff(NULL, 0, &pad_bytes, __aligned_be64(sizeof(pad_bytes), 4), tcp->check);  // Since I am appending only 0s, pad_bytes won't have any data; I dont need this step.
+        // // __u32 tcp_check_offset = &tcp->check - data;
+        // /* Padding actual bytes than 0s (Optional) - END */
+        //
+        // // I can't combine these two calls into a single bpf_csum_diff and do bpf_l4_csum_replace once because of BPF_F_PSEUDO_HDR flag
+        // // bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), 0, seq_diff, 0);
+        // /* SEQ Num Fix - END */
+        //
+        // __u16 old_tcp_len = old_ip_len - ip_hl;
+        // __u16 new_tcp_len = new_ip_len - ip_hl;
+        // bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), bpf_htons(old_tcp_len), bpf_htons(new_tcp_len), BPF_F_PSEUDO_HDR | 2);  // Change specifically for the Pseudo-header of TCP
+        //
+        // /** TCP END **/
+        // /*** FIXES FOR INCREASING PACKET LENGTH ***/
 
     } else {
         bpf_printk("Packet length is >= PMTU. Don't Pad.\n");

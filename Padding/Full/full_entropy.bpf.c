@@ -12,13 +12,13 @@
 #define TC_ACT_OK 0  /* Terminate the packet processing pipeline and allows the packet to proceed */
 #define TC_ACT_SHOT 2  /* Terminate the packet processing pipeline and drops the packet */
 
-#define DEVICE_MTU 1500  // I always need to verify the device's MTU prior
+#define DEVICE_MTU 1500  // I always need to verify the device's MTU prior for this program to work perfectly
 
 #define PAD_BYTES 100  // No need to define any hexadecimal or other data because I'm padding zeroes
 
 /***** REMOVE bpf_printk()s IN PROD *****/
 
-/* LRU HashMap */
+/* LRU HashMap for XDP to fix ingress ack_seq */
 // Key //
 struct flow {
     // Network-order
@@ -37,6 +37,26 @@ struct {
     __type(key, struct flow);
     __type(value, struct ack_info);
 } ack_map SEC(".maps");
+
+/* LRU HashMap for TC-Egress to fix seq_num */
+// Key //
+struct seq_key {
+    // Network-order
+    __be32 saddr, daddr;
+    __be16 sport, dport;
+};
+// Value //
+struct seq_info {
+    // Can use __be32 seq directly without wrapping inside a struct, but might add more fields in future
+    __be32 seq;  // network-order SEQ (tcp->seq)
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1);
+    __type(key, struct seq_key);
+    __type(value, struct seq_info);
+} seq_map SEC(".maps");
 
 // Function for checking pointer arithmetic for verifier
 static __always_inline bool verifier_checker(void *data, void *data_end, __u32 need) {
@@ -173,18 +193,20 @@ int tc_egress(struct __sk_buff *ctx) {
 
     bpf_printk("Initial packet length is: %u\n", init_pkt_len);
 
-    /* Add Initial packet ACK to map */
-    struct flow key = {
+    /* Add Initial packet SEQ to map to serve as ACK on Ingress*/
+    u32 tcp_payload_len_only_orig = bpf_ntohs(ip->tot_len) - ip_hl - tcp_hl;  // all host-byte order
+    struct flow ack_key = {
         .saddr = ip->saddr,
         .daddr = ip->daddr,
         .sport = tcp->source,
         .dport = tcp->dest,
     };
-    struct ack_info value = {
-        .ack = tcp->ack_seq,  // Store Network-order
+    struct ack_info ack_val = {
+        // The original seq_num of pkt will be correct ack returning from remote
+        .ack = tcp->seq + bpf_htonl(tcp_payload_len_only_orig),  // Store Network-order
     };
 
-    bpf_map_update_elem(&ack_map, &key, &value, BPF_ANY);
+    bpf_map_update_elem(&ack_map, &ack_key, &ack_val, BPF_ANY);
 
     /** Start of Padding code **/
     /* Grab Path MTU */
@@ -197,12 +219,12 @@ int tc_egress(struct __sk_buff *ctx) {
     fib.dport = tcp->dest;
     fib.ipv4_src = ip->saddr;
     fib.ipv4_dst = ip->daddr;
-    fib.tot_len = bpf_htons(old_ip_len + (DEVICE_MTU - old_ip_len));  // Always push it
+    fib.tot_len = bpf_htons(old_ip_len + (DEVICE_MTU - old_ip_len));  // Always push it to trigger FIB_FRAGMENTATION_NEEDED
 
     long ret = bpf_fib_lookup(ctx, &fib, sizeof(fib), BPF_FIB_LOOKUP_OUTPUT);
 
-    __u32 pad_bytes = 0;
-    __u32 fib_mtu = 0;
+    u32 pad_bytes = 0;
+    u32 fib_mtu = 0;
 
     fib_mtu = fib.mtu_result;
     if (fib_mtu <= 0) {
@@ -282,27 +304,37 @@ int tc_egress(struct __sk_buff *ctx) {
 
         /** TCP START **/
         /* SEQ Num Fix - START */
-        // __be32 old_seq_num = tcp->seq;
-        // __be32 new_seq_num = ntohl(old_seq_num) + pad_bytes;  // If I dont fix seq_num, it might overload the recv_window_size of the receiver
-        // tcp->seq = htonl(new_seq_num);  // No need for htonl coz of __be32
-        //
+        // If I don't fix seq_num, it might overload the recv_window_size of the receiver
+        u32 tcp_payload_len_only_new = new_ip_len - ip_hl - tcp_hl;  // all host-byte order
+        struct seq_key s_key = {
+            .saddr = ip->saddr,
+            .daddr = ip->daddr,
+            .sport = tcp->source,
+            .dport = tcp->dest,
+        };
+        u32 curr_pkt_seq_num = tcp->seq;  // seq_num of current pkt (not updated)
+        u32 *prev_pkt_seq_num = bpf_map_lookup_elem(&seq_map, &s_key);  // seq_num of previous pkt
+        if (prev_pkt_seq_num) {  // seq_num exists in the map already; update it and fix current pkt seq_num
+            tcp->seq = *prev_pkt_seq_num;  // No need for htonl coz of __be32
+            struct seq_info s_val = {
+                .seq = *prev_pkt_seq_num + bpf_htonl(tcp_payload_len_only_new),  // network-byte order
+            };
+            bpf_map_update_elem(&seq_map, &s_key, &s_val, BPF_EXIST);
+        } else {  // First entry
+            struct seq_info s_val = {
+                .seq = tcp->seq + bpf_htonl(tcp_payload_len_only_new),  // network-byte order
+            };
+            bpf_map_update_elem(&seq_map, &s_key, &s_val, BPF_NOEXIST);  // BPF_NOEXIST secondary defense
+        }
         // /* L4-TCP checksum replace */
-        // __s64 seq_diff = bpf_csum_diff(&old_seq_num, sizeof(old_seq_num), &new_seq_num, sizeof(new_seq_num), tcp->check);
-
-        /* Padding actual bytes than 0s (Optional) - START */
-        // I need this step if I am padding bytes other than 0s.
-        //__s64 payload_diff = bpf_csum_diff(NULL, 0, &pad_bytes, __aligned_be64(sizeof(pad_bytes), 4), tcp->check);  // Since I am appending only 0s, pad_bytes won't have any data; I dont need this step.
-        // __u32 tcp_check_offset = &tcp->check - data;
-        /* Padding actual bytes than 0s (Optional) - END */
-
-        // I can combine these two calls into a single bpf_csum_diff and do bpf_l4_csum_replace once.
-        // bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), 0, seq_diff, 0);
+        bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), curr_pkt_seq_num, tcp->seq, 0);  // all network-byte order
         /* SEQ Num Fix - END */
 
+        /* TCP Pseudo-header (IP) Fix - START */
         __u16 old_tcp_len = old_ip_len - ip_hl;
         __u16 new_tcp_len = new_ip_len - ip_hl;
         bpf_l4_csum_replace(ctx, offsetof(struct tcphdr, check), bpf_htons(old_tcp_len), bpf_htons(new_tcp_len), BPF_F_PSEUDO_HDR | 2);  // Change specifically for the Pseudo-header of TCP
-
+        /* TCP Pseudo-header (IP) Fix - END */
         /** TCP END **/
         /*** FIXES FOR INCREASING PACKET LENGTH ***/
 
